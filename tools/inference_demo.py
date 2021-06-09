@@ -32,6 +32,8 @@ import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision
 
+from tqdm import tqdm
+
 import _init_paths
 import models
 
@@ -149,7 +151,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train keypoints network')
     # general
     parser.add_argument('--cfg', type=str, required=True)
-    parser.add_argument('--videoFile', type=str, required=True)
+    parser.add_argument('--videoFile', type=str, required=False)
+    parser.add_argument('--imgFile', type=str, required=False)
     parser.add_argument('--outputDir', type=str, default='/output/')
     parser.add_argument('--inferenceFps', type=int, default=10)
     parser.add_argument('--visthre', type=float, default=0)
@@ -200,86 +203,122 @@ def main():
     pose_model.to(CTX)
     pose_model.eval()
 
-    # Loading an video
-    vidcap = cv2.VideoCapture(args.videoFile)
-    fps = vidcap.get(cv2.CAP_PROP_FPS)
-    if fps < args.inferenceFps:
-        raise ValueError('desired inference fps is ' +
-                         str(args.inferenceFps)+' but video fps is '+str(fps))
-    skip_frame_cnt = round(fps / args.inferenceFps)
-    frame_width = int(vidcap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_height = int(vidcap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    outcap = cv2.VideoWriter('{}/{}_pose.avi'.format(args.outputDir, os.path.splitext(os.path.basename(args.videoFile))[0]),
-                             cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'), int(skip_frame_cnt), (frame_width, frame_height))
+    if args.videoFile:
+        # Loading a video
+        vidcap = cv2.VideoCapture(args.videoFile)
+        fps = vidcap.get(cv2.CAP_PROP_FPS)
+        if fps < args.inferenceFps:
+            raise ValueError('desired inference fps is ' +
+                             str(args.inferenceFps)+' but video fps is '+str(fps))
+        skip_frame_cnt = round(fps / args.inferenceFps)
+        frame_width = int(vidcap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(vidcap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        outcap = cv2.VideoWriter('{}/{}_pose.avi'.format(args.outputDir, os.path.splitext(os.path.basename(args.videoFile))[0]),
+                                 cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'), int(skip_frame_cnt), (frame_width, frame_height))
 
-    count = 0
-    while vidcap.isOpened():
-        total_now = time.time()
-        ret, image_bgr = vidcap.read()
-        count += 1
+        def loop():
+            while vidcap.isOpened():
+                yield
 
-        if not ret:
-            break
-
-        if count % skip_frame_cnt != 0:
-            continue
-
-        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-
-        image_pose = image_rgb.copy()
-
-        # Clone 1 image for debugging purpose
-        image_debug = image_bgr.copy()
-
-        now = time.time()
-        pose_preds = get_pose_estimation_prediction(
-            cfg, pose_model, image_pose, args.visthre, transforms=pose_transform)
-        then = time.time()
-        if len(pose_preds) == 0:
+        count = 0
+        for _ in tqdm(loop()):
+            total_now = time.time()
+            ret, image_bgr = vidcap.read()
             count += 1
-            continue
 
-        print("Find person pose in: {} sec".format(then - now))
+            if not ret:
+                break
 
-        new_csv_row = []
-        for coords in pose_preds:
-            # Draw each point on image
-            for coord in coords:
-                x_coord, y_coord = int(coord[0]), int(coord[1])
-                cv2.circle(image_debug, (x_coord, y_coord), 4, (255, 0, 0), 2)
-                new_csv_row.extend([x_coord, y_coord])
+            if count % skip_frame_cnt != 0:
+                continue
 
-        total_then = time.time()
-        text = "{:03.2f} sec".format(total_then - total_now)
-        cv2.putText(image_debug, text, (100, 50), cv2.FONT_HERSHEY_SIMPLEX,
-                    1, (0, 0, 255), 2, cv2.LINE_AA)
+            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
 
-        csv_output_rows.append(new_csv_row)
-        img_file = os.path.join(pose_dir, 'pose_{:08d}.jpg'.format(count))
+            image_pose = image_rgb.copy()
+
+            # Clone 1 image for debugging purpose
+            image_debug = image_bgr.copy()
+
+            now = time.time()
+            pose_preds = get_pose_estimation_prediction(
+                cfg, pose_model, image_pose, args.visthre, transforms=pose_transform)
+            then = time.time()
+            if len(pose_preds) == 0:
+                count += 1
+                continue
+
+            # print("Find person pose in: {} sec".format(then - now))
+
+            new_csv_row = []
+            for coords in pose_preds:
+                # Draw each point on image
+                for coord in coords:
+                    x_coord, y_coord = int(coord[0]), int(coord[1])
+                    cv2.circle(image_debug, (x_coord, y_coord), 4, (255, 0, 0), 2)
+                    new_csv_row.extend([x_coord, y_coord])
+
+            total_then = time.time()
+            text = "{:03.2f} sec".format(total_then - total_now)
+            cv2.putText(image_debug, text, (100, 50), cv2.FONT_HERSHEY_SIMPLEX,
+                        1, (0, 0, 255), 2, cv2.LINE_AA)
+
+            csv_output_rows.append(new_csv_row)
+            img_file = os.path.join(pose_dir, 'vid_{:08d}.jpg'.format(count))
+            cv2.imwrite(img_file, image_debug)
+            outcap.write(image_debug)
+
+        # write csv
+        csv_headers = ['frame']
+        if cfg.DATASET.DATASET_TEST == 'coco':
+            for keypoint in COCO_KEYPOINT_INDEXES.values():
+                csv_headers.extend([keypoint+'_x', keypoint+'_y'])
+        elif cfg.DATASET.DATASET_TEST == 'crowd_pose':
+            for keypoint in COCO_KEYPOINT_INDEXES.values():
+                csv_headers.extend([keypoint+'_x', keypoint+'_y'])
+        else:
+            raise ValueError('Please implement keypoint_index for new dataset: %s.' % cfg.DATASET.DATASET_TEST)
+
+        csv_output_filename = os.path.join(args.outputDir, 'pose-data.csv')
+        with open(csv_output_filename, 'w', newline='') as csvfile:
+            csvwriter = csv.writer(csvfile)
+            csvwriter.writerow(csv_headers)
+            csvwriter.writerows(csv_output_rows)
+
+        vidcap.release()
+        outcap.release()
+
+        cv2.destroyAllWindows()
+    elif args.imgFile:
+        # Loading an image
+        image_bgr = cv2.imread(args.imgFile)
+
+        for _ in tqdm(range(100)):
+            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+
+            image_pose = image_rgb.copy()
+
+            # Clone 1 image for debugging purpose
+            image_debug = image_bgr.copy()
+
+            pose_preds = get_pose_estimation_prediction(
+                cfg, pose_model, image_pose, args.visthre, transforms=pose_transform)
+            then = time.time()
+            if len(pose_preds) == 0:
+                print("Can't detect keypoints!")
+                break
+
+            for coords in pose_preds:
+                # Draw each point on image
+                for coord in coords:
+                    x_coord, y_coord = int(coord[0]), int(coord[1])
+                    cv2.circle(image_debug, (x_coord, y_coord), 4, (255, 0, 0), 2)
+
+        img_file = os.path.join(pose_dir, 'img.jpg')
         cv2.imwrite(img_file, image_debug)
-        outcap.write(image_debug)
 
-    # write csv
-    csv_headers = ['frame']
-    if cfg.DATASET.DATASET_TEST == 'coco':
-        for keypoint in COCO_KEYPOINT_INDEXES.values():
-            csv_headers.extend([keypoint+'_x', keypoint+'_y'])
-    elif cfg.DATASET.DATASET_TEST == 'crowd_pose':
-        for keypoint in COCO_KEYPOINT_INDEXES.values():
-            csv_headers.extend([keypoint+'_x', keypoint+'_y'])
+        cv2.destroyAllWindows()
     else:
-        raise ValueError('Please implement keypoint_index for new dataset: %s.' % cfg.DATASET.DATASET_TEST)
-
-    csv_output_filename = os.path.join(args.outputDir, 'pose-data.csv')
-    with open(csv_output_filename, 'w', newline='') as csvfile:
-        csvwriter = csv.writer(csvfile)
-        csvwriter.writerow(csv_headers)
-        csvwriter.writerows(csv_output_rows)
-
-    vidcap.release()
-    outcap.release()
-
-    cv2.destroyAllWindows()
+        print("Please add --videoFile or --imgFile to run inference!")
 
 
 if __name__ == '__main__':
