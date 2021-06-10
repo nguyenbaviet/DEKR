@@ -156,6 +156,8 @@ def parse_args():
     parser.add_argument('--outputDir', type=str, default='/output/')
     parser.add_argument('--inferenceFps', type=int, default=10)
     parser.add_argument('--visthre', type=float, default=0)
+    parser.add_argument('--speed', action='store_true', default=False, help='Calculate FPS or not?')
+    parser.add_argument('--testTime', type=int, default=100)
     parser.add_argument('opts',
                         help='Modify config options using the command-line',
                         default=None,
@@ -211,6 +213,7 @@ def main():
             raise ValueError('desired inference fps is ' +
                              str(args.inferenceFps)+' but video fps is '+str(fps))
         skip_frame_cnt = round(fps / args.inferenceFps)
+        print("Take one per %i frame(s)" % skip_frame_cnt)
         frame_width = int(vidcap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(vidcap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         outcap = cv2.VideoWriter('{}/{}_pose.avi'.format(args.outputDir, os.path.splitext(os.path.basename(args.videoFile))[0]),
@@ -255,34 +258,37 @@ def main():
                 for coord in coords:
                     x_coord, y_coord = int(coord[0]), int(coord[1])
                     cv2.circle(image_debug, (x_coord, y_coord), 4, (255, 0, 0), 2)
-                    new_csv_row.extend([x_coord, y_coord])
+                    if not args.speed:
+                        new_csv_row.extend([x_coord, y_coord])
 
-            total_then = time.time()
-            text = "{:03.2f} sec".format(total_then - total_now)
-            cv2.putText(image_debug, text, (100, 50), cv2.FONT_HERSHEY_SIMPLEX,
-                        1, (0, 0, 255), 2, cv2.LINE_AA)
+            if not args.speed:
+                total_then = time.time()
+                text = "{:03.2f} sec".format(total_then - total_now)
+                cv2.putText(image_debug, text, (100, 50), cv2.FONT_HERSHEY_SIMPLEX,
+                            1, (0, 0, 255), 2, cv2.LINE_AA)
 
-            csv_output_rows.append(new_csv_row)
-            img_file = os.path.join(pose_dir, 'vid_{:08d}.jpg'.format(count))
-            cv2.imwrite(img_file, image_debug)
+                csv_output_rows.append(new_csv_row)
+                img_file = os.path.join(pose_dir, 'vid_{:08d}.jpg'.format(count))
+                cv2.imwrite(img_file, image_debug)
             outcap.write(image_debug)
 
-        # write csv
-        csv_headers = ['frame']
-        if cfg.DATASET.DATASET_TEST == 'coco':
-            for keypoint in COCO_KEYPOINT_INDEXES.values():
-                csv_headers.extend([keypoint+'_x', keypoint+'_y'])
-        elif cfg.DATASET.DATASET_TEST == 'crowd_pose':
-            for keypoint in COCO_KEYPOINT_INDEXES.values():
-                csv_headers.extend([keypoint+'_x', keypoint+'_y'])
-        else:
-            raise ValueError('Please implement keypoint_index for new dataset: %s.' % cfg.DATASET.DATASET_TEST)
+        if not args.speed:
+            # write csv
+            csv_headers = ['frame']
+            if cfg.DATASET.DATASET_TEST == 'coco':
+                for keypoint in COCO_KEYPOINT_INDEXES.values():
+                    csv_headers.extend([keypoint+'_x', keypoint+'_y'])
+            elif cfg.DATASET.DATASET_TEST == 'crowd_pose':
+                for keypoint in COCO_KEYPOINT_INDEXES.values():
+                    csv_headers.extend([keypoint+'_x', keypoint+'_y'])
+            else:
+                raise ValueError('Please implement keypoint_index for new dataset: %s.' % cfg.DATASET.DATASET_TEST)
 
-        csv_output_filename = os.path.join(args.outputDir, 'pose-data.csv')
-        with open(csv_output_filename, 'w', newline='') as csvfile:
-            csvwriter = csv.writer(csvfile)
-            csvwriter.writerow(csv_headers)
-            csvwriter.writerows(csv_output_rows)
+            csv_output_filename = os.path.join(args.outputDir, 'pose-data.csv')
+            with open(csv_output_filename, 'w', newline='') as csvfile:
+                csvwriter = csv.writer(csvfile)
+                csvwriter.writerow(csv_headers)
+                csvwriter.writerows(csv_output_rows)
 
         vidcap.release()
         outcap.release()
@@ -292,7 +298,9 @@ def main():
         # Loading an image
         image_bgr = cv2.imread(args.imgFile)
 
-        for _ in tqdm(range(100)):
+        if not args.speed:
+            args.testTime = 1
+        for _ in tqdm(range(args.testTime)):
             image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
 
             image_pose = image_rgb.copy()
